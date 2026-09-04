@@ -1649,12 +1649,81 @@ graph* AST2Graph(PNode* root) {
     if (it->second->type == NODE_REG_SRC) it->second->updateDep();
   }
 
+  /* A clocked (registered) external/blackbox module is a sequential element: its outputs reflect
+   * internal state sampled at the clock edge, NOT a combinational function of this cycle's inputs.
+   * GSIM models an extmodule as one node whose outputs all depend on all inputs (in -> ext -> out),
+   * which is the safe assumption for a *combinational* blackbox but manufactures a false zero-delay
+   * loop for a clocked one when the inputs are (legitimately) combinationally derived from the
+   * outputs through the surrounding fabric (e.g. an AXI ready/valid path through a crossbar back to
+   * a SimDRAM memory model). Verilator does not see this loop because the blackbox is clocked C++.
+   * Mirror that: for a clocked ext node, drop the input->ext scheduling edges so the ext node
+   * becomes a schedule source (like a register read), evaluated at cycle start from the inputs
+   * latched on the previous edge. The assignTree still references the inputs, so the emitted call
+   * still passes them; only the combinational ordering constraint is removed. This breaks the
+   * false cycle and gives the blackbox one-cycle (registered) latency, matching real hardware. */
+  /* Break the FALSE combinational loops GSIM's ext model manufactures, MINIMALLY. GSIM models a
+   * clocked ext as one node whose outputs all depend on all inputs; when an ext input is really a
+   * combinational function of that same ext's outputs (an AXI/TL ready-valid path looping back
+   * through a crossbar for SimDRAM, or an FPU pipe's resp.ready derived from the ext's resp.tag for
+   * CVFPU), that assumption closes a zero-delay cycle Verilator never sees (the blackbox is clocked
+   * C++). Sever ONLY those loop-closing input edges: for each clocked ext, compute the set of nodes
+   * combinationally reachable FROM its own outputs (forward along next, stopping at any sequential
+   * element), and drop the input->ext edge for every ext input in that set. The ext's real data
+   * inputs (a memory's addr/data held stable across the handshake; a compute unit's operands) are
+   * NOT reachable from its outputs, so they stay combinational -- a locally-pipelined ext keeps its
+   * native latency and its recomposer stays aligned, while the false cycle is gone. Marked inputs
+   * are recorded (loopBreakInput) so Node::updateConnect keeps them severed across every
+   * reconnectAll rebuild. */
   for (auto it = allSignals.begin(); it != allSignals.end(); it ++) {
-    it->second->constructSuperNode();
+    Node* ext = it->second;
+    if (!ext || ext->type != NODE_EXT || !ext->clock) continue;
+    // Nodes combinationally reachable FROM this ext's own outputs (forward along next, stopping at
+    // any sequential element). An ext input in this set is a false-loop closer.
+    std::set<Node*> reach;
+    std::stack<Node*> stk;
+    for (Node* out : ext->next) stk.push(out);          // the ext's EXT_OUT nodes
+    while (!stk.empty()) {
+      Node* n = stk.top(); stk.pop();
+      if (reach.count(n)) continue;
+      reach.insert(n);
+      if (n != ext && (n->type == NODE_REG_SRC || n->type == NODE_REG_DST
+                       || n->type == NODE_EXT || n->type == NODE_MEMORY)) continue;
+      for (Node* nx : n->next) if (!reach.count(nx)) stk.push(nx);
+    }
+    std::vector<Node*> ins(ext->prev.begin(), ext->prev.end());
+    /* How much to sever depends on what KIND of element the ext's C++ model is -- a fact of the
+     * model, carried by the ext defname (extraInfo):
+     *  - A REGISTERED state element (a memory/serial model: SimDRAM, SimTSI, SimUART, SimJTAG, and
+     *    any other clocked ext by default). Its outputs reflect internal state sampled at the clock
+     *    edge, so it must be a schedule SOURCE with one cycle of latency: sever ALL its inputs.
+     *    (Leaving it combinational makes a zero-latency memory whose ready/valid loops back through
+     *    the coherence crossbar and stalls the fabric -- the whole Muon then never issues.)
+     *  - A COMBINATIONAL-FEEDBACK compute unit whose C++ model already carries the pipeline latency
+     *    internally (CVFPU, ProfilerBlackBox), wrapped by feed-forward decompose/recompose logic
+     *    that expects the ext's NATIVE latency. GSIM's all-outputs-depend-on-all-inputs ext model
+     *    still manufactures ONE false loop -- the ext's resp.ready is a function of its own resp.tag
+     *    -- so sever ONLY the loop-closing inputs (those combinationally reachable from the ext's own
+     *    outputs), leaving the operands live. Full severing here would add a spurious extra cycle
+     *    that desyncs the recomposer, so the dependent FMA's running-sum accumulator (rs3) reads 0.
+     * Both kinds record loopBreakInput so Node::updateConnect keeps the severing across reconnectAll. */
+    bool combUnit = ext->extraInfo.find("CVFPU") != std::string::npos
+                 || ext->extraInfo.find("ProfilerBlackBox") != std::string::npos;
+    std::vector<Node*> toSever;
+    if (combUnit) { for (Node* in : ins) if (reach.count(in)) toSever.push_back(in); }
+    else          { toSever = ins; }
+    for (Node* in : toSever) {
+      in->loopBreakInput = true;
+      ext->erasePrev(in);
+      in->eraseNext(ext);
+    }
+  }
+
+  for (auto it = allSignals.begin(); it != allSignals.end(); it ++) {
+    if (it->second) it->second->constructSuperNode();   // guard: a null signal (e.g. from a blackbox ext output) must not deref
   }
   /* must be called after constructSuperNode all finished */
   for (auto it = allSignals.begin(); it != allSignals.end(); it ++) {
-    it->second->constructSuperConnect();
+    if (it->second) it->second->constructSuperConnect();
   }
   /* find all sources: regsrc, memory rdata, input, constant node */
   for (Node* reg : g->regsrc) {

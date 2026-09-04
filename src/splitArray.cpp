@@ -87,6 +87,53 @@ bool point2self(Node* node) {
   return false;
 }
 
+static void dumpRealCycle(graph* g) {
+  /* Find an actual combinational cycle among the stuck (non-fullyVisited) nodes by DFS
+   * along prev edges restricted to nodes that are not fullyVisited. Any real cycle must
+   * lie entirely within this set. Prints one concrete cycle for diagnosis. */
+  std::map<Node*, int> color; // 0=white,1=gray,2=black
+  auto blocked = [&](Node* n) { return fullyVisited.find(n) == fullyVisited.end(); };
+  int printed = 0;
+  for (Node* seed : partialVisited) {
+    if (color.count(seed)) continue;
+    std::vector<Node*> path;
+    std::stack<std::pair<Node*, std::vector<Node*>>> st;
+    std::stack<size_t> cursor;
+    { std::vector<Node*> prevs; for (Node* p : seed->prev) if (blocked(p)) prevs.push_back(p);
+      st.push({seed, prevs}); cursor.push(0); color[seed] = 1; path.push_back(seed); }
+    while (!st.empty()) {
+      Node* node = st.top().first;
+      auto& prevs = st.top().second;
+      size_t& ci = cursor.top();
+      bool descended = false;
+      while (ci < prevs.size()) {
+        Node* p = prevs[ci++];
+        if (color[p] == 1) {
+          // found a cycle: from p up to node in path
+          size_t start = 0;
+          for (size_t i = 0; i < path.size(); i++) if (path[i] == p) { start = i; break; }
+          printf("==== REAL COMBINATIONAL CYCLE (len %ld) ====\n", path.size() - start + 1);
+          for (size_t i = start; i < path.size(); i++)
+            printf("  [%ld] %s (type=%d prev=%ld next=%ld)\n", i - start,
+                   path[i]->name.c_str(), path[i]->type, path[i]->prev.size(), path[i]->next.size());
+          printf("  -> back to [0] %s\n", p->name.c_str());
+          if (++printed >= 3) return;
+          // continue searching for more distinct cycles
+          continue;
+        }
+        if (color[p] == 0) {
+          std::vector<Node*> pprevs; for (Node* pp : p->prev) if (blocked(pp)) pprevs.push_back(pp);
+          st.push({p, pprevs}); cursor.push(0); color[p] = 1; path.push_back(p);
+          descended = true; break;
+        }
+      }
+      if (descended) continue;
+      color[node] = 2; path.pop_back(); st.pop(); cursor.pop();
+    }
+  }
+  if (printed == 0) printf("==== no cycle found among blocked prev edges (unexpected) ====\n");
+}
+
 Node* getSplitArray(graph* g) {
   /* array points to itself */
   for (Node* node : partialVisited) {
@@ -111,6 +158,8 @@ Node* getSplitArray(graph* g) {
       if (fullyVisited.find(prev) == fullyVisited.end()) printf("  missing %s\n", prev->name.c_str());
     }
   }
+
+  dumpRealCycle(g);
 
   Panic();
 

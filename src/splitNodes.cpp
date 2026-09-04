@@ -200,7 +200,17 @@ NodeComponent* ENode::inferComponent(Node* n) {
       componentEMap[this] = ret;
       return ret;
     }
-    Assert(componentMap.find(node) != componentMap.end(), "%s is not visited when infer %s %p", node->name.c_str(), n->name.c_str(), this);
+    if (componentMap.find(node) == componentMap.end()) {
+      /* A clocked extmodule is scheduled as a source (its input->ext combinational edges are
+       * severed in AST2Graph to break false zero-delay loops), so a node it references may not be
+       * component-inferred yet. splitNodes is a bit-splitting optimization; treat an un-inferred
+       * reference opaquely (as the whole node) — always sound, it just declines to split across it. */
+      NodeComponent* ret = new NodeComponent();
+      ret->addElement(new NodeElement(ELE_NODE, node, width - 1, 0));
+      ret->addDirectElement(new NodeElement(ELE_NODE, node, width - 1, 0));
+      componentEMap[this] = ret;
+      return ret;
+    }
     NodeComponent* ret = componentMap[node]->getbits(width-1, 0);
     if (!ret->fullValid()) {
       ret = new NodeComponent();

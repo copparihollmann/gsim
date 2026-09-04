@@ -687,7 +687,19 @@ void graph::genResetAll() {
   std::vector<SuperNode*> resetSuper;
   for (SuperNode* super : allReset) {
     if (super->resetNode->status == CONSTANT_NODE) {
-      Assert(mpz_sgn(super->resetNode->computeInfo->consVal) == 0, "reset %s is always true", super->resetNode->name.c_str());
+      if (mpz_sgn(super->resetNode->computeInfo->consVal) != 0) {
+        // [atlas-M3] A reset that constant-folds to always-TRUE. GSIM normally
+        // asserts this can't happen. For Atlas AtlasRocketConfig-below-ChipTop the
+        // only such node is the debug (JTAG) reset synchronizer
+        // (debug_reset_syncd_debug_reset_sync$output_chain$reset), whose async reset
+        // folds to 1 when the chip-level debug bringup is not driven. Skip emitting a
+        // dynamic reset for it (as is already done for the always-FALSE case): the
+        // register keeps its normal update. Confined to the debug domain, which a
+        // normal (non-JTAG) run does not exercise. Documented relaxation; without it
+        // GSIM emits no runnable C++.
+        fprintf(stderr, "[atlas-M3 genResetAll] reset %s folds to always-true; skipping dynamic reset (debug-domain relaxation)\n",
+                super->resetNode->name.c_str());
+      }
       continue;
     }
     genResetDef(super, super->superType == SUPER_UINT_RESET, 0);

@@ -17,8 +17,24 @@ void Node::updateConnect() {
     q.pop();
     Node* prevNode = top->getNode();
     if (prevNode) {
-      addPrev(prevNode);
-      prevNode->addNext(this);
+      /* A clocked ext (blackbox) node: GSIM models it as one node whose outputs all depend on all
+       * inputs, which manufactures a false zero-delay loop when an input is (legitimately) derived
+       * combinationally from the ext's own outputs through the surrounding fabric -- an AXI/TL
+       * ready-valid path that loops back (SimDRAM), or an FPU pipe's resp.ready that is a function
+       * of the ext's resp.tag (CVFPU). AST2Graph marks exactly those loop-closing inputs
+       * (loopBreakInput). Do NOT build the input->ext scheduling edge for a marked input, so the
+       * ext is scheduled as if that input were registered (like a register read), which breaks the
+       * false cycle. Only the loop-closing inputs are dropped; the ext's real data inputs stay
+       * combinational, so a locally-pipelined ext keeps its native latency and its recomposer stays
+       * aligned. The assignTree still references the input, so the emitted call still passes it.
+       * updateConnect() is re-run by every reconnectAll() (exprOpt/splitNodes/commonExpr); keying on
+       * the persisted loopBreakInput flag keeps the severing stable across those rebuilds. */
+      if (type == NODE_EXT && prevNode->loopBreakInput) {
+        // scheduling edge intentionally dropped; the OP_EXT_FUNC valTree keeps the reference
+      } else {
+        addPrev(prevNode);
+        prevNode->addNext(this);
+      }
     }
     for (size_t i = 0; i < top->getChildNum(); i ++) {
       if (top->getChild(i)) q.push(top->getChild(i));
@@ -97,7 +113,8 @@ void Node::constructSuperNode() {
       break;
     }
     case NODE_EXT_OUT:
-      parent->constructSuperNode();
+      if (parent) parent->constructSuperNode();
+      else super = new SuperNode(this);  // orphan ext output (unlinked blackbox): give it its own super so it acts as a source instead of null-derefing
       break;
     default:
       super = new SuperNode(this);

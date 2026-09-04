@@ -106,6 +106,9 @@ ALLID: ID {$$ = $1; }
     | Printf { $$ = "printf"; }
     | Assert { $$ = "assert"; }
     | Mem { $$ = "mem"; }
+    | SMem { $$ = "smem"; }
+    | CMem { $$ = "cmem"; }
+    | Flip { $$ = "flip"; }
     | Of { $$ = "of"; }
     | Reg { $$ = "reg"; }
     | Input { $$ = "input"; }
@@ -321,6 +324,7 @@ params:                            { $$ = new PNode(P_PARAMS); }
     ;
 param: Parameter ALLID '=' String  { $$ = newNode(P_PARAM_STR, synlineno(), $2, 0); $$->appendExtraInfo($4); }
     | Parameter ALLID '=' INT      { $$ = newNode(P_PARAM_INT, synlineno(), $2, 0); $$->appendExtraInfo($4); }
+    | Parameter ALLID '=' INT '.' ID { $$ = newNode(P_PARAM_STR, synlineno(), $2, 0); $$->appendExtraInfo($4); }
     ;
 extmodule: Extmodule ALLID ':' info INDENT ports ext_defname params DEDENT  { $$ = newNode(P_EXTMOD, synlineno(), $4, $2, 2, $6, $8); $$->appendExtraInfo($7); }
     ;

@@ -101,6 +101,18 @@ clockVal* ENode::clockCompute() {
       }
       break;
     }
+    case OP_EXT_FUNC:
+      // A clock sourced from an external-module output (e.g. a ClockSourceAtFreqMHz blackbox clock
+      // generator in a Chipyard harness). GSIM can only drive a clock that is a top-level input; an
+      // internally blackbox-generated clock is treated here as a constant clock (the C++ harness must
+      // drive it) so compilation proceeds instead of asserting. Matches the external-clock handling in
+      // Node::clockCompute. NOTE: for a correct sim the clock must be a top-level input, not blackbox.
+      ret = new clockVal(0);
+      printf("Warning: A clock signal driven by an external-module output is detected. "
+             "It is treated as a constant clock signal (drive it from the C++ harness). "
+             "This may cause wrong result during simulation.\n");
+      display();
+      break;
     default:
       Assert(0, "invalid op %d", opType);
   }

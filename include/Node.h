@@ -104,6 +104,8 @@ class Node {
 
   std::string name;  // concat the module name in order (member in structure / temp variable)
   std::string extraInfo; // ruw for memory
+  bool loopBreakInput = false; // EXT_IN that closes a false comb loop into its clocked ext; its
+                               // input->ext scheduling edge is kept severed across every reconnectAll
   int id = -1;
   NodeType type;
   int width = -1;
