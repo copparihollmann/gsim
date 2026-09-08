@@ -16,8 +16,18 @@ GSIM-compiled `RadianceGsimConfig` (or an Atlas/Gemmini SoC) can boot an ELF and
    that point it at a clang++).
 2. Emit C++ for the design: `../reemit.sh <config>.fir <workdir>` — the `.fir` comes from a Chipyard
    elaboration under `$MERLIN_CHIPYARD/sims/verilator/generated-src/<config>/`.
-3. Compile the emitted sources together with the three files here into `emu`.
+3. Compile the emitted sources together with the three files here into `emu`:
+   `../build_radiance_emu.sh <emitted-obj-dir> <fresh-build-dir> [source.fir]`.
+   The helper requires exactly 224 emitted translation units, applies the known four-symbol Gemmini
+   im2col partition shim only to `TestHarness1.cpp`, and records commands, per-file wall/RSS
+   measurements, hashes, and a machine-readable `build_record.json` with the explicit
+   pre-existing-FIRRTL adoption boundary. It deliberately does not claim that it elaborated the
+   optional FIRRTL input.
 4. Run: `./emu <kernel.soc.elf> +loadmem=<kernel.soc.elf> +max-cycles=<N>`.
+   For the self-checking compiler smoke, use
+   `../smoke_radiance_emu.sh <emu> <kernel.soc.elf> <emitted-obj-dir> <result-dir>`.
+   It fails closed unless the run reaches the emitted model's sole hardware-success exit before both
+   caps, with no timeout, mismatch, assertion, failure, or harness-loop completion witness.
 
 ## Note on `.flexinc/`
 
