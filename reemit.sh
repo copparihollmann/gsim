@@ -14,7 +14,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GSIM_BIN="${GSIM_BIN:-$HERE/build/gsim/gsim}"
 WORK="${2:-${GSIM_WORK:-$PWD/gsim-work}}/$(basename "${FIR%.fir}")"
 
-mkdir -p "$WORK"
+mkdir -p "$WORK/obj"
 LOG="$WORK/reemit.log"
 echo "=== reemit start $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" > "$LOG"
 "$GSIM_BIN" \
