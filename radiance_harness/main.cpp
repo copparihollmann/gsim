@@ -8,14 +8,193 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <chrono>
 #include <string>
+#include <vector>
 #include "TestHarness.h"
 
 extern "C" void harness_set_args(int argc, char** argv);
 extern "C" bool dram_peek(uint64_t phys, void* buf, unsigned long n);
 extern volatile bool g_tsi_done;
 extern int g_exit_code;
+
+static volatile bool g_model_finished = false;
+// Compatibility hook for an explicitly patched emitted stop site. The normal
+// Radiance host-readback path observes the generated allFinished signal before
+// stopSim invalidates the private caches.
+extern "C" void gsim_model_finished(void) { g_model_finished = true; }
+
+static bool enabled(const char* value) {
+  return value && (!strcmp(value, "1") || !strcmp(value, "true") ||
+                   !strcmp(value, "yes") || !strcmp(value, "on"));
+}
+
+static bool parse_u64(const char* text, uint64_t* value) {
+  if (!text || !*text) return false;
+  char* end = nullptr;
+  const unsigned long long parsed = strtoull(text, &end, 0);
+  if (!end || *end != '\0') return false;
+  *value = (uint64_t)parsed;
+  return true;
+}
+
+static bool binary_dump(STestHarness* dut, const char* path, uint64_t address,
+                        uint64_t local_address, uint64_t length) {
+  if (!path || path[0] != '/' || length == 0) return false;
+  std::vector<unsigned char> result((size_t)length);
+  if (!dram_peek(address, result.data(), (unsigned long)length)) return false;
+
+  // The inclusive L2 is 8-way, with 2048 32-byte sets. The emitted address
+  // equations are set=phys[15:5], tag=phys[32:16]. Each way/set address is
+  // banked by set[0]: banks 0..3 hold even sets and 4..7 hold odd sets, at
+  // index=(way << 10) | set[10:1]. Directory entries are
+  // {dirty[22], state[21:20], clients[19:17], tag[16:0]}.
+  //
+  // L0 writeback at allFinished is ordered into this cache, but the inclusive
+  // cache is not itself flushed to DRAM. Overlay valid L2 lines before L0.
+  const uint64_t first_l2_line = address & ~UINT64_C(31);
+  const uint64_t last_l2_line = (address + length - 1) & ~UINT64_C(31);
+  const size_t l2_line_count =
+      (size_t)((last_l2_line - first_l2_line) / 32 + 1);
+  size_t l2_overlaid = 0;
+  for (size_t line_no = 0; line_no < l2_line_count; ++line_no) {
+    const uint64_t line_addr = first_l2_line + line_no * 32;
+    const size_t set = (size_t)((line_addr >> 5) & 0x7ff);
+    const uint32_t wanted_tag = (uint32_t)((line_addr >> 16) & 0x1ffff);
+    int matching_way = -1;
+    for (int way = 0; way < 8; ++way) {
+      const uint32_t entry =
+          dut->chiptop0$system$coh_wrapper$l2$inclusive_cache_bank_sched$directory$cc_dir[set][way];
+      const uint32_t state = (entry >> 20) & 3;
+      const uint32_t clients = (entry >> 17) & 7;
+      const uint32_t tag = entry & 0x1ffff;
+      if (l2_line_count <= 4) {
+        fprintf(stderr,
+                "[gsim-emu] L2_PROBE phys_line=0x%llx set=%zu way=%d entry=0x%x state=%u clients=0x%x tag=0x%x want=0x%x\n",
+                (unsigned long long)line_addr, set, way, entry, state,
+                clients, tag, wanted_tag);
+      }
+      // state==0 means the L2 data way is invalid. A clients-only directory
+      // entry names a private L0 owner and is intentionally handled below.
+      if (state == 0 || tag != wanted_tag) continue;
+      if (matching_way >= 0) {
+        fprintf(stderr,
+                "[gsim-emu] L2_OVERLAY conflict phys_line=0x%llx set=%zu ways=%d,%d\n",
+                (unsigned long long)line_addr, set, matching_way, way);
+        return false;
+      }
+      matching_way = way;
+    }
+    if (matching_way < 0) continue;
+    const size_t data_index = ((size_t)matching_way << 10) | (set >> 1);
+    const int first_bank = (set & 1) ? 4 : 0;
+    uint64_t words[4];
+#define L2_BANK(n) \
+    dut->chiptop0$system$coh_wrapper$l2$inclusive_cache_bank_sched$bankedStore$cc_banks_##n[data_index]
+    if (first_bank == 0) {
+      words[0] = L2_BANK(0); words[1] = L2_BANK(1);
+      words[2] = L2_BANK(2); words[3] = L2_BANK(3);
+    } else {
+      words[0] = L2_BANK(4); words[1] = L2_BANK(5);
+      words[2] = L2_BANK(6); words[3] = L2_BANK(7);
+    }
+#undef L2_BANK
+    const uint64_t begin = address > line_addr ? address - line_addr : 0;
+    const uint64_t end_addr =
+        address + length < line_addr + 32 ? address + length : line_addr + 32;
+    const uint64_t end = end_addr - line_addr;
+    memcpy(&result[(line_addr + begin) - address],
+           reinterpret_cast<unsigned char*>(words) + begin,
+           (size_t)(end - begin));
+    l2_overlaid++;
+  }
+  fprintf(stderr,
+          "[gsim-emu] L2_OVERLAY complete lines=%zu/%zu phys=0x%llx\n",
+          l2_overlaid, l2_line_count, (unsigned long long)address);
+
+  // This engine is bound to the emitted RadianceGsimConfig L0D shape: one
+  // direct-mapped 64-set x 64-byte data array per Muon core, with metadata
+  // {state[1:0], tag[18:0]}, index=address[11:6], tag=address>>12.  DRAM alone
+  // is insufficient because a successful allFinished/stopSim may leave the
+  // final dirty lines resident. Overlay every matching valid line and refuse
+  // incoherent duplicates instead of guessing which core owns it.
+  const uint64_t first_line = local_address & ~UINT64_C(63);
+  const uint64_t last_line = (local_address + length - 1) & ~UINT64_C(63);
+  const size_t line_count = (size_t)((last_line - first_line) / 64 + 1);
+  std::vector<unsigned char> seen(line_count, 0);
+  std::vector<unsigned char> cache_bytes(line_count * 64);
+  size_t overlaid = 0;
+  bool conflict = false;
+  auto visit = [&](const char* label, auto& meta, auto& data) {
+    for (size_t line_no = 0; line_no < line_count; ++line_no) {
+      const uint64_t line_addr = first_line + line_no * 64;
+      const size_t index = (size_t)((line_addr >> 6) & 63);
+      const uint32_t entry = meta[index];
+      const uint32_t state = (entry >> 19) & 3;
+      const uint32_t tag = entry & 0x7ffff;
+      const uint64_t phys_line = address + (line_addr - local_address);
+      if (line_count <= 4) {
+        uint32_t probe_words[16];
+        memcpy(probe_words, &data[index], sizeof(probe_words));
+        fprintf(stderr,
+                "[gsim-emu] CACHE_PROBE cache=%s local_line=0x%llx index=%zu entry=0x%x state=%u tag=0x%x want=0x%llx data=%08x,%08x,%08x,%08x\n",
+                label, (unsigned long long)line_addr, index, entry, state, tag,
+                (unsigned long long)((phys_line >> 12) & 0x7ffff),
+                probe_words[0], probe_words[1], probe_words[2], probe_words[3]);
+      }
+      if (state == 0 || tag != ((phys_line >> 12) & 0x7ffff)) continue;
+      unsigned char line[64];
+      memcpy(line, &data[index], sizeof(line));
+      if (seen[line_no] && memcmp(&cache_bytes[line_no * 64], line, 64) != 0) {
+        fprintf(stderr,
+                "[gsim-emu] CACHE_OVERLAY conflict cache=%s local_line=0x%llx index=%zu\n",
+                label, (unsigned long long)line_addr, index);
+        conflict = true;
+        continue;
+      }
+      if (!seen[line_no]) {
+        memcpy(&cache_bytes[line_no * 64], line, 64);
+        seen[line_no] = 1;
+        overlaid++;
+      }
+    }
+  };
+#define VISIT_L0D(label, prefix) visit(label, \
+    dut->prefix##$l0d$tlnbdCache$nbdCache$meta$tag_array, \
+    dut->prefix##$l0d$tlnbdCache$nbdCache$data$array_0_0)
+  VISIT_L0D("c0t0", chiptop0$system$cluster_prci_domain$element_reset_domain$element$tile_prci_domain$element_reset_domain$muon_tile);
+  VISIT_L0D("c0t1", chiptop0$system$cluster_prci_domain$element_reset_domain$element$tile_prci_domain_1$element_reset_domain$muon_tile);
+  VISIT_L0D("c1t0", chiptop0$system$cluster_prci_domain_1$element_reset_domain$element$tile_prci_domain$element_reset_domain$muon_tile);
+  VISIT_L0D("c1t1", chiptop0$system$cluster_prci_domain_1$element_reset_domain$element$tile_prci_domain_1$element_reset_domain$muon_tile);
+#undef VISIT_L0D
+  if (conflict) return false;
+  for (size_t line_no = 0; line_no < line_count; ++line_no) {
+    if (!seen[line_no]) continue;
+    const uint64_t line_addr = first_line + line_no * 64;
+    const uint64_t begin = local_address > line_addr ? local_address - line_addr : 0;
+    const uint64_t end_addr = local_address + length < line_addr + 64
+        ? local_address + length : line_addr + 64;
+    const uint64_t end = end_addr - line_addr;
+    memcpy(&result[(line_addr + begin) - local_address],
+           &cache_bytes[line_no * 64 + begin], (size_t)(end - begin));
+  }
+  fprintf(stderr, "[gsim-emu] CACHE_OVERLAY complete lines=%zu/%zu local=0x%llx\n",
+          overlaid, line_count, (unsigned long long)local_address);
+
+  FILE* output = fopen(path, "wb");
+  if (!output) return false;
+  const size_t written = fwrite(result.data(), 1, result.size(), output);
+  const bool ok = fclose(output) == 0 && written == result.size();
+  if (!ok) {
+    fprintf(stderr, "[gsim-emu] BINARY_DUMP failed address=0x%llx requested=%llu written=%zu\n",
+            (unsigned long long)address, (unsigned long long)length, written);
+    return false;
+  }
+  fprintf(stderr, "[gsim-emu] BINARY_DUMP complete bytes=%llu\n",
+          (unsigned long long)length);
+  return true;
+}
 
 int main(int argc, char** argv) {
   if (argc < 2) { fprintf(stderr, "usage: %s <soc.elf> [+plusargs]\n", argv[0]); return 2; }
@@ -25,6 +204,17 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a.rfind("+max-cycles=", 0) == 0) max_cycles = strtoull(a.c_str() + 12, nullptr, 0);
+  }
+  const bool stop_on_finish = enabled(getenv("GSIM_STOP_ON_FINISH"));
+  const char* dump_file = getenv("GSIM_DUMP_FILE");
+  uint64_t dump_address = 0, dump_local_address = 0, dump_length = 0;
+  const bool dump_requested = dump_file != nullptr;
+  if (dump_requested &&
+      (!stop_on_finish || !parse_u64(getenv("GSIM_DUMP_ADDR"), &dump_address) ||
+       !parse_u64(getenv("GSIM_DUMP_LOCAL_ADDR"), &dump_local_address) ||
+       !parse_u64(getenv("GSIM_DUMP_LEN"), &dump_length) || dump_length == 0)) {
+    fprintf(stderr, "[gsim-emu] invalid binary-dump ABI; require STOP_ON_FINISH plus FILE/ADDR/LOCAL_ADDR/LEN\n");
+    return 2;
   }
 
   STestHarness* dut = new STestHarness();
@@ -117,11 +307,18 @@ int main(int argc, char** argv) {
 
   auto start = std::chrono::steady_clock::now();
   uint64_t cycles = 0;
+  bool saw_not_finished = !FIN_ALL;
   extern unsigned long long g_sim_cycle;
-  while (!g_tsi_done && cycles < max_cycles) {
+  while (!g_tsi_done && !(stop_on_finish && g_model_finished) && cycles < max_cycles) {
     dut->step();
     cycles++;
     g_sim_cycle = cycles;
+    if (!FIN_ALL) saw_not_finished = true;
+    if (stop_on_finish && saw_not_finished && FIN_ALL) {
+      g_model_finished = true;
+      fprintf(stderr, "[gsim-emu] RTL_COMPLETION allFinished=1 after_observed_low=1\n");
+      break;
+    }
     if (cycles >= 1 && cycles <= 160) FPROBE(cycles);
     if (getenv("WB_TRACE")) WB_ALL(cycles);
     if (getenv("FLUSH_TRACE")) FLUSH_PROBE(cycles);
@@ -140,8 +337,17 @@ int main(int argc, char** argv) {
   double secs = std::chrono::duration<double>(end - start).count();
 
   fflush(stdout);
-  fprintf(stderr, "\n[gsim-emu] FINISHED: cycles=%llu wall=%.2fs (%.0f cyc/s) done=%d exit_code=%d\n",
-          (unsigned long long)cycles, secs, cycles / (secs > 0 ? secs : 1), (int)g_tsi_done, g_exit_code);
+  fprintf(stderr, "\n[gsim-emu] FINISHED: cycles=%llu wall=%.2fs (%.0f cyc/s) done=%d model_finished=%d exit_code=%d\n",
+          (unsigned long long)cycles, secs, cycles / (secs > 0 ? secs : 1),
+          (int)g_tsi_done, (int)g_model_finished, g_exit_code);
+
+  if (dump_requested) {
+    if (!g_model_finished) {
+      fprintf(stderr, "[gsim-emu] refusing binary dump without RTL model completion\n");
+      return 3;
+    }
+    if (!binary_dump(dut, dump_file, dump_address, dump_local_address, dump_length)) return 4;
+  }
 
   // Optional DRAM dumps: GSIM_DUMP=addr:len[,addr:len...] (hex addr, decimal len) -> hex to stderr
   if (const char* env = getenv("GSIM_DUMP")) {
