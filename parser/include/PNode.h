@@ -78,6 +78,7 @@ enum PNodeType{
   P_INVALID,
   P_PARAM_STR,
   P_PARAM_INT,
+  P_PARAM_REAL,
   P_PARAMS
 };
 

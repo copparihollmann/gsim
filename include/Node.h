@@ -129,7 +129,8 @@ class Node {
   SuperNode* super = nullptr;
   std::vector<Node*> member;
   /* for extmodule */
-  std::vector<std::pair<bool, std::string>> params; // <isInt, value>
+  std::vector<std::pair<int, std::string>> params; // <P_PARAM_* kind, value>
+  Node* clockTick = nullptr; // Rising-edge guard in explicit level-clock mode.
   /* only used in AST2Graph */
   ExpTree* valTree = nullptr;
   /* for registers in AST2Graph*/
@@ -260,6 +261,7 @@ class Node {
   bool isExt() {
     return type == NODE_EXT || type == NODE_EXT_IN || type == NODE_EXT_OUT;
   }
+  std::string extNextName() const { return name + "$__gsim_next_sample"; }
   void clear_relation();
   void addPrev(Node* node);
   void addPrev(std::set<Node*>& super);

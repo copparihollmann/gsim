@@ -94,6 +94,7 @@ class graph {
   void removeNodes(NodeStatus status);
   void mergeRegister();
   void clockOptimize(std::map<std::string, Node*>& allSignals);
+  void dynamicClockOptimize(std::map<std::string, Node*>& allSignals);
   void constantAnalysis();
   void constructRegs();
   void commonExpr();

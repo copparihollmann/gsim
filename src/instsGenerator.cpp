@@ -1373,7 +1373,20 @@ valInfo* ENode::instsPrintf() {
 valInfo* ENode::instsExit() {
   valInfo* ret = computeInfo;
   ret->status = VAL_FINISH;
-  std::string exitInst = format("if %s { exit(%s); }", addBracket(ChildInfo(0, valStr)).c_str(), strVal.c_str());
+  // FIRRTL `stop(..., 0)` is a successful simulation completion.  The generated
+  // model exits from inside step(), so a surrounding harness cannot print a
+  // completion record after step() returns.  Emit the record at the actual stop
+  // site; non-zero stops deliberately get no success witness.
+  std::string exitInst;
+  if (strVal == "0") {
+    exitInst = format(
+      "if %s { fprintf(stderr, \"GSIM model finished execution.\\n\"); "
+      "fflush(stderr); exit(0); }",
+      addBracket(ChildInfo(0, valStr)).c_str());
+  } else {
+    exitInst = format("if %s { exit(%s); }",
+                      addBracket(ChildInfo(0, valStr)).c_str(), strVal.c_str());
+  }
   ret->valStr = exitInst;
   ret->opNum = -1;
   return ret;
@@ -1699,7 +1712,12 @@ void StmtNode::compute(std::vector<InstInfo>& insts, std::set<InstInfo> assign_i
       Node* node = tree->getlval()->getNode();
       valInfo* linfo = tree->getlval()->compute(node, INVALID_LVALUE, false);
       valInfo* rinfo = tree->getRoot()->compute(node, linfo->valStr, true);
-      if (rinfo->status == VAL_FINISH || node->type == NODE_SPECIAL) { // printf / assert
+      // Constant analysis replaces disabled/satisfied side effects with a
+      // literal. That literal is a no-op, not a C++ statement (or an assignment
+      // to the synthetic special node), including inside a clock guard.
+      if (node->type == NODE_SPECIAL &&
+          (rinfo->status == VAL_CONSTANT || rinfo->status == VAL_EMPTY)) {
+      } else if (rinfo->status == VAL_FINISH || node->type == NODE_SPECIAL) { // printf / assert
         insts.emplace_back(rinfo->valStr);
       } else if (rinfo->status == VAL_INVALID) {
       } else if (rinfo->opNum >= 0) {
@@ -1771,7 +1789,10 @@ std::string computeExtMod(SuperNode* super) {
   std::string inst = funcName + "(";
   int argIdx = 0;
   for (auto param : super->member[0]->params) {
-    funcDecl += (param.first ? "int _" : "const char* _") + std::to_string(argIdx ++) + ", ";
+    std::string type = param.first == P_PARAM_INT ?
+      (globalConfig.DynamicClocks ? "int64_t _" : "int _") :
+      (param.first == P_PARAM_REAL ? "double _" : "const char* _");
+    funcDecl += type + std::to_string(argIdx ++) + ", ";
     inst += param.second + ", ";
   }
 
@@ -1806,12 +1827,17 @@ std::string computeExtMod(SuperNode* super) {
         TODO();
       } else {
         funcDecl += widthUType(arg->width) + "& _" + std::to_string(argIdx ++);
-        inst += arg->name;
+        inst += super->member[0]->clockTick ? arg->extNextName() : arg->name;
       }
     }
   }
   funcDecl += ");";
   inst += ");";
+  Node* tick = super->member[0]->clockTick;
+  if (tick) {
+    std::string guard = tick->status == CONSTANT_NODE ? tick->computeInfo->valStr : tick->name;
+    inst = "if (" + guard + ") { " + inst + " }";
+  }
   super->insts.push_back(inst);
   return funcDecl;
 }

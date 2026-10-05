@@ -324,7 +324,7 @@ params:                            { $$ = new PNode(P_PARAMS); }
     ;
 param: Parameter ALLID '=' String  { $$ = newNode(P_PARAM_STR, synlineno(), $2, 0); $$->appendExtraInfo($4); }
     | Parameter ALLID '=' INT      { $$ = newNode(P_PARAM_INT, synlineno(), $2, 0); $$->appendExtraInfo($4); }
-    | Parameter ALLID '=' INT '.' ID { $$ = newNode(P_PARAM_STR, synlineno(), $2, 0); $$->appendExtraInfo($4); }
+    | Parameter ALLID '=' INT '.' ID { $$ = newNode(P_PARAM_REAL, synlineno(), $2, 0); $$->appendExtraInfo((std::string($4) + "." + $6).c_str()); }
     ;
 extmodule: Extmodule ALLID ':' info INDENT ports ext_defname params DEDENT  { $$ = newNode(P_EXTMOD, synlineno(), $4, $2, 2, $6, $8); $$->appendExtraInfo($7); }
     ;

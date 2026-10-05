@@ -560,7 +560,8 @@ void visitExtModule(graph* g, PNode* module) {
         // output clock is produced by the external model and must remain a
         // member of its call/output dependency graph, including when cast to
         // UInt and consumed as data by another blackbox.
-        if (entry.first->isClock && entry.first->type == NODE_EXT_IN) {
+        bool combinational = globalConfig.CombinationalExtmods.count(extNode->extraInfo);
+        if (entry.first->isClock && entry.first->type == NODE_EXT_IN && !combinational) {
           if (!extNode->clock) extNode->clock = entry.first;
           else entry.first->type = NODE_OTHERS;
         } else extNode->add_member(entry.first);
@@ -574,7 +575,7 @@ void visitExtModule(graph* g, PNode* module) {
     PNode* params = module->getChild(1);
     for (int i = 0; i < params->getChildNum(); i ++) {
       PNode* param = params->getChild(i);
-      extNode->params.push_back(std::make_pair(param->type == P_PARAM_INT, param->getExtra(0)));
+      extNode->params.push_back(std::make_pair(param->type, param->getExtra(0)));
     }
     /* construct valTree for every output and NODE_EXT */
     /* in -> ext */
@@ -1186,6 +1187,7 @@ void visitWhenConnect(graph* g, PNode* connect) {
 void visitWhenPrintf(graph* g, PNode* print) {
   TYPE_CHECK(print, 3, 3, P_PRINTF);
   Node* n = allocNode(NODE_SPECIAL, prefixName(SEP_MODULE, "PRINTF_" + std::to_string(print->lineno)), print->lineno);
+  if (globalConfig.DynamicClocks) n->clock = visitExpr(g, print->getChild(0))->getExpRoot()->getNode();
   ASTExpTree* exp = visitExpr(g, print->getChild(1)); // cond
 
   ENode* expRoot = exp->getExpRoot();
@@ -1219,6 +1221,7 @@ void visitWhenAssert(graph* g, PNode* ass) {
   TYPE_CHECK(ass, 3, 3, P_ASSERT);
   std::string assertName = ass->name.empty() ? format("ASSERT_%d", ass->lineno) : ass->name;
   Node* n = allocNode(NODE_SPECIAL, prefixName(SEP_MODULE, assertName), ass->lineno);
+  if (globalConfig.DynamicClocks) n->clock = visitExpr(g, ass->getChild(0))->getExpRoot()->getNode();
 
   ASTExpTree* pred = visitExpr(g, ass->getChild(1));
   ASTExpTree* en = visitExpr(g, ass->getChild(2));
@@ -1253,6 +1256,7 @@ void visitWhenStop(graph* g, PNode* stop) {
   TYPE_CHECK(stop, 2, 2, P_STOP);
   std::string stopName = stop->name.empty() ? format("STOP_%d", stop->lineno) : stop->name;
   Node* n = allocNode(NODE_SPECIAL, prefixName(SEP_MODULE, stopName), stop->lineno);
+  if (globalConfig.DynamicClocks) n->clock = visitExpr(g, stop->getChild(0))->getExpRoot()->getNode();
 
   ASTExpTree* exp = visitExpr(g, stop->getChild(1));
 
@@ -1340,6 +1344,7 @@ void visitWhen(graph* g, PNode* when) {
 void visitPrintf(graph* g, PNode* print) {
   TYPE_CHECK(print, 3, 3, P_PRINTF);
   Node* n = allocNode(NODE_SPECIAL, prefixName(SEP_MODULE, print->name), print->lineno);
+  if (globalConfig.DynamicClocks) n->clock = visitExpr(g, print->getChild(0))->getExpRoot()->getNode();
   ASTExpTree* exp = visitExpr(g, print->getChild(1));
 
   ENode* enode = new ENode(OP_PRINTF);
@@ -1374,6 +1379,7 @@ void visitStop(graph* g, PNode* stop) {
 
   std::string stopName = stop->name.empty() ? format("STOP_%d", stop->lineno) : stop->name;
   Node* n = allocNode(NODE_SPECIAL, prefixName(SEP_MODULE, stopName), stop->lineno);
+  if (globalConfig.DynamicClocks) n->clock = visitExpr(g, stop->getChild(0))->getExpRoot()->getNode();
   n->valTree = new ExpTree(enode, new ENode(n));
   addSignal(n->name, n);
   g->specialNodes.push_back(n);
@@ -1387,6 +1393,7 @@ void visitAssert(graph* g, PNode* ass) {
   TYPE_CHECK(ass, 3, 3, P_ASSERT);
   std::string assertName = ass->name.empty() ? format("ASSERT_%d", ass->lineno) : ass->name;
   Node* n = allocNode(NODE_SPECIAL, prefixName(SEP_MODULE, assertName), ass->lineno);
+  if (globalConfig.DynamicClocks) n->clock = visitExpr(g, ass->getChild(0))->getExpRoot()->getNode();
 
   ASTExpTree* pred = visitExpr(g, ass->getChild(1));
   ASTExpTree* en = visitExpr(g, ass->getChild(2));
@@ -1643,7 +1650,8 @@ graph* AST2Graph(PNode* root) {
     reg->addReset();
     reg->addUpdateTree();
   }
-  g->clockOptimize(allSignals);
+  if (globalConfig.DynamicClocks) g->dynamicClockOptimize(allSignals);
+  else g->clockOptimize(allSignals);
 
   for (auto it = allSignals.begin(); it != allSignals.end(); it ++) {
     it->second->invalidArrayOptimize();
@@ -1716,6 +1724,7 @@ graph* AST2Graph(PNode* root) {
     if (combUnit) { for (Node* in : ins) if (reach.count(in)) toSever.push_back(in); }
     else          { toSever = ins; }
     for (Node* in : toSever) {
+      if (in == ext->clockTick) continue;
       in->loopBreakInput = true;
       ext->erasePrev(in);
       in->eraseNext(ext);

@@ -7,6 +7,8 @@ struct Config {
   bool DumpGraphJson;
   bool DumpAssignTree;
   bool DumpConstStatus;
+  bool DynamicClocks;
+  std::set<std::string> CombinationalExtmods;
   std::string OutputDir;
   int SuperNodeMaxSize;
   uint32_t cppMaxSizeKB;

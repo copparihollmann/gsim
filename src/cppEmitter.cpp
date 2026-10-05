@@ -716,6 +716,23 @@ void graph::genResetAll() {
 
 void graph::genStep(int subStepIdxMax) {
   emitFuncDecl(0, "void S%s::step() {\n", name.c_str());
+  // A clocked external model publishes registered outputs, just like RTL
+  // nonblocking assignments. Its current edge must not change the inputs that
+  // another sequential consumer samples at that same edge. Commit the pending
+  // values before evaluating the following sample and activate their consumers.
+  for (SuperNode* super : sortedSuper) {
+    if (super->superType != SUPER_EXTMOD || !super->member[0]->clockTick) continue;
+    for (size_t i = 1; i < super->member.size(); ++i) {
+      Node* out = super->member[i];
+      emitBodyLock(1, "if (%s != %s) {\n", out->name.c_str(), out->extNextName().c_str());
+      emitBodyLock(2, "%s = %s;\n", out->name.c_str(), out->extNextName().c_str());
+      std::map<uint64_t, ActiveType> bits;
+      activeSet2bitMap(out->nextActiveId, bits, -1);
+      for (auto bit : bits)
+        emitBodyLock(2, "%s\n", updateActiveStr(bit.first, ACTIVE_MASK(bit.second)).c_str());
+      emitBodyLock(1, "}\n");
+    }
+  }
   emitBodyLock(1, "resetAll();\n");
   for (SuperNode* super : sortedSuper) {
     for (Node* member : super->member) {
@@ -765,6 +782,12 @@ bool graph::__emitSrc(int indent, bool canNewFile, bool alreadyEndFunc, const ch
 void graph::emitPrintf() {
   emitFuncDecl(0, "void gprintf(const char *fmt, ...) {\n");
   emitBodyLock(0,
+  "  const char *all = getenv(\"GSIM_HW_PRINTF\");\n"
+  "  if ((!all || !*all || strcmp(all, \"0\") == 0)\n"
+  "      && !strstr(fmt, \"Assertion failed\")\n"
+  "      && !strstr(fmt, \"Timeout exceeded\")\n"
+  "      && !strstr(fmt, \"Cycles:\")\n"
+  "      && !strstr(fmt, \"finished execution\")) return;\n"
   "  FILE *fp = stderr;\n"
   "  va_list args;\n"
   "  va_start(args, fmt);\n"
@@ -888,7 +911,13 @@ void graph::cppEmitter() {
       for (Node* n : super->member) genNodeDef(header, n);
     }
     if (super->superType == SUPER_EXTMOD) {
-      for (size_t i = 1; i < super->member.size(); i ++) genNodeDef(header, super->member[i]);
+      for (size_t i = 1; i < super->member.size(); i ++) {
+        genNodeDef(header, super->member[i]);
+        if (super->member[0]->clockTick) {
+          Node* out = super->member[i];
+          fprintf(header, "%s %s;\n", widthUType(out->width).c_str(), out->extNextName().c_str());
+        }
+      }
     }
   }
   /* memory definition */
@@ -896,10 +925,10 @@ void graph::cppEmitter() {
   fprintf(header, "uint32_t _var_end;\n");
 
   emitBodyLock(0, "// initialize registers with reset value 0 to overwrite the rand() results\n" );
-  emitBodyLock(1, "memset(&_var_start, 0, &_var_end - &_var_start);\n");
+  emitBodyLock(1, "memset(&_var_start, 0, reinterpret_cast<char*>(&_var_end) - reinterpret_cast<char*>(&_var_start));\n");
 
   emitBodyLock(0, "#else\n" // RANDOMIZE_INIT
-               "  memset(&_var_start, 0, &_var_end - &_var_start);\n"
+               "  memset(&_var_start, 0, reinterpret_cast<char*>(&_var_end) - reinterpret_cast<char*>(&_var_start));\n"
                "#endif\n");
 
   fprintf(header, "S%s();\n", name.c_str());
