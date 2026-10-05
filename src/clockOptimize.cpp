@@ -43,11 +43,8 @@ clockVal* ENode::clockCompute() {
       ret = new clockVal(0);
       break;
     case OP_EQ:
-      ret = new clockVal(0);
-      printf("Warning: A clock signal driven by the == operator is detected. "
-             "It is not supported now and treated as a constant clock signal. "
-             "This may cause wrong result during simulation.\n");
-      display();
+      Assert(0, "unsupported equality-derived clock; cannot replace it with "
+                "a constant clock without changing simulation semantics");
       break;
     case OP_OR:
       ret = new clockVal(false);
@@ -102,16 +99,11 @@ clockVal* ENode::clockCompute() {
       break;
     }
     case OP_EXT_FUNC:
-      // A clock sourced from an external-module output (e.g. a ClockSourceAtFreqMHz blackbox clock
-      // generator in a Chipyard harness). GSIM can only drive a clock that is a top-level input; an
-      // internally blackbox-generated clock is treated here as a constant clock (the C++ harness must
-      // drive it) so compilation proceeds instead of asserting. Matches the external-clock handling in
-      // Node::clockCompute. NOTE: for a correct sim the clock must be a top-level input, not blackbox.
-      ret = new clockVal(0);
-      printf("Warning: A clock signal driven by an external-module output is detected. "
-             "It is treated as a constant clock signal (drive it from the C++ harness). "
-             "This may cause wrong result during simulation.\n");
-      display();
+      // The body of a blackbox is not present in FIRRTL.  Treating its
+      // generated clock as constant silently removes all clocked state.  It
+      // requires explicit clock-domain support, not an alias/constant guess.
+      Assert(0, "unsupported external-module clock source; cannot replace it "
+                "with a constant clock without changing simulation semantics");
       break;
     default:
       Assert(0, "invalid op %d", opType);
@@ -127,13 +119,15 @@ clockVal* Node::clockCompute() {
   }
   Assert(assignTree.size() <= 1, "multiple clock assignment in %s", name.c_str());
   if (assignTree.size() != 0) {
+    Assert(assignTree[0]->getRoot()->opType != OP_EXT_FUNC,
+           "unsupported external-module clock source %s at line %d; "
+           "cannot replace it with a constant clock without changing "
+           "simulation semantics", name.c_str(), lineno);
     clockMap[this] = assignTree[0]->getRoot()->clockCompute();
   } else {
-    clockMap[this] = new clockVal(0);
-    printf("Warning: An external clock signal is detected. "
-           "It is not supported now and treated as a constant clock signal. "
-           "This may cause wrong result during simulation.\n");
-    display();
+    Assert(0, "unsupported undriven clock %s at line %d; cannot replace it "
+              "with a constant clock without changing simulation semantics",
+              name.c_str(), lineno);
   }
   return clockMap[this];
 }
@@ -183,10 +177,16 @@ bool ExpTree::isReadTree() {
 void graph::clockOptimize(std::map<std::string, Node*>& allSignals) {
   for (auto iter : allSignals) {
     Node* node = iter.second;
-    if (!node->isClock) continue;
-    Assert(!node->isArray(), "clock %s is array", node->name.c_str());
-    if (node->type == NODE_INP) clockMap[node] = new clockVal(node);
-    else node->clockCompute();
+    // Only analyse clocks actually used for sequential evaluation.  A
+    // Clock-typed output used as data is still an ordinary blackbox output;
+    // evaluating its timing here would incorrectly classify the producer as
+    // a clocked consumer or reject a clock which drives no state at all.
+    bool consumer = node->type == NODE_REG_DST || node->type == NODE_EXT ||
+                    node->type == NODE_READER || node->type == NODE_WRITER ||
+                    node->type == NODE_READWRITER;
+    if (!consumer || !node->clock) continue;
+    Assert(!node->clock->isArray(), "clock %s is array", node->clock->name.c_str());
+    node->clock->clockCompute();
   }
 
   for (auto iter : allSignals) {

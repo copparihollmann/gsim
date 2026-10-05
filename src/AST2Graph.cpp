@@ -556,7 +556,11 @@ void visitExtModule(graph* g, PNode* module) {
     for (int i = 0; i < ports->getChildNum(); i ++) {
       TypeInfo* portInfo = visitPort(g, ports->getChild(i), P_EXTMOD);
       for (auto entry : portInfo->aggrMember) {
-        if (entry.first->isClock) {
+        // Only an input clock makes a blackbox a sequential element.  An
+        // output clock is produced by the external model and must remain a
+        // member of its call/output dependency graph, including when cast to
+        // UInt and consumed as data by another blackbox.
+        if (entry.first->isClock && entry.first->type == NODE_EXT_IN) {
           if (!extNode->clock) extNode->clock = entry.first;
           else entry.first->type = NODE_OTHERS;
         } else extNode->add_member(entry.first);
