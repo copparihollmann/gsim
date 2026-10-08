@@ -10,8 +10,8 @@
 #
 # Environment:
 #   JOBS                 parallel C++ jobs (default: 4)
-#   CXX                  clang++ or wrapper (default: ./cxxwrap.sh)
-#   CHIPYARD             Chipyard checkout (default below)
+#   CXX                  absolute clang++ or wrapper path (default: ./cxxwrap_portable.sh)
+#   CHIPYARD             Chipyard checkout (or MERLIN_CHIPYARD; required)
 #   FESVR_PREFIX         include/lib prefix (default: $CHIPYARD/.conda-env/riscv-tools)
 #   SOFTFLOAT_ROOT       directory containing softfloat.h
 #   SOFTFLOAT_LIB        libsoftfloat.a path
@@ -28,8 +28,9 @@ model_dir="$(realpath "$1")"
 out_dir="$(realpath -m "$2")"
 firrtl="${3:-}"
 jobs="${JOBS:-4}"
-cxx="${CXX:-$here/cxxwrap.sh}"
-chipyard="${CHIPYARD:-/scratch/agustin/projects/chipyard}"
+cxx="${CXX:-$here/cxxwrap_portable.sh}"
+chipyard="${CHIPYARD:-${MERLIN_CHIPYARD:-}}"
+[[ -n "$chipyard" ]] || { echo "set CHIPYARD or MERLIN_CHIPYARD to the selected checkout" >&2; exit 2; }
 fesvr_prefix="${FESVR_PREFIX:-$chipyard/.conda-env/riscv-tools}"
 softfloat_root="${SOFTFLOAT_ROOT:-$chipyard/toolchains/riscv-tools/riscv-isa-sim/softfloat}"
 softfloat_lib="${SOFTFLOAT_LIB:-$chipyard/toolchains/riscv-tools/riscv-isa-sim/build/libsoftfloat.a}"

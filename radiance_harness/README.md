@@ -12,8 +12,9 @@ GSIM-compiled `RadianceGsimConfig` (or an Atlas/Gemmini SoC) can boot an ELF and
 
 ## Building
 
-1. Build the patched GSIM (`../cxxwrap.sh` is the compiler wrapper; see its header for the env vars
-   that point it at a clang++).
+1. Build the patched GSIM with `../cxxwrap_portable.sh`; set `GSIM_CLANGXX` to the
+   selected Clang executable and `CHIPYARD` to the selected checkout. The historical
+   `../cxxwrap.sh` is retained for old byte-bound receipts, not for new machines.
 2. Emit C++ for the design: `../reemit.sh <config>.fir <workdir>` — the `.fir` comes from a Chipyard
    elaboration under `$MERLIN_CHIPYARD/sims/verilator/generated-src/<config>/`.
 3. Compile the emitted sources together with the three files here into `emu`:

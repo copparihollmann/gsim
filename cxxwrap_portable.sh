@@ -13,19 +13,27 @@
 #
 # Point GSIM_CLANGXX (or MERLIN_CLANG, which merlin already sets) at the clang++ to use; falls back
 # to whatever clang++ is on PATH. GSIM_GCC_INSTALL_DIR overrides the pinned gcc toolchain; by
-# default the newest /usr/lib/gcc/<triple>/<version> on the box is used.
+# default the newest GCC installation with matching C++ development headers is used.
 set -euo pipefail
 
 CXX="${GSIM_CLANGXX:-${MERLIN_CLANG:-clang++}}"
-case "$CXX" in
-  */clang) CXX="${CXX}++" ;;
-esac
 
 if [ -z "${GSIM_GCC_INSTALL_DIR:-}" ]; then
   triple="$(uname -m)-linux-gnu"
-  GSIM_GCC_INSTALL_DIR="$(ls -d /usr/lib/gcc/"$triple"/* 2>/dev/null | sort -V | tail -1)"
+  gcc_dirs=()
+  for candidate in /usr/lib/gcc/"$triple"/*; do
+    version="${candidate##*/}"
+    if [[ -d "$candidate" && -f "/usr/include/c++/$version/iostream" &&
+          -f "/usr/include/$triple/c++/$version/bits/c++config.h" ]]; then
+      gcc_dirs+=("$candidate")
+    fi
+  done
+  if (( ${#gcc_dirs[@]} )); then
+    GSIM_GCC_INSTALL_DIR="$(printf '%s\n' "${gcc_dirs[@]}" | sort -V | tail -1)"
+  fi
 fi
 
 exec "$CXX" \
+  --driver-mode=g++ \
   ${GSIM_GCC_INSTALL_DIR:+--gcc-install-dir="$GSIM_GCC_INSTALL_DIR"} \
   -Wno-gcc-install-dir-libstdcxx -Wno-error=gcc-install-dir-libstdcxx "$@"
