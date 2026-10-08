@@ -22,6 +22,7 @@ struct Request {
   bool enabled = false;
   std::string regions;
   std::string output;
+  enum class Mode { coherent, coherent_packet } mode = Mode::coherent;
 };
 
 struct Region {
@@ -43,6 +44,9 @@ inline Request request_from_args(int argc, char** argv) {
       request.output = arg.substr(sizeof("+dump-out=") - 1);
       have_output = true;
     } else if (arg == "+dump-mode=coherent" && !have_mode) {
+      have_mode = true;
+    } else if (arg == "+dump-mode=coherent-packet" && !have_mode) {
+      request.mode = Request::Mode::coherent_packet;
       have_mode = true;
     } else {
       throw std::runtime_error("unknown or duplicate terminal dump option");
@@ -149,6 +153,12 @@ inline void write_u64(int fd, uint64_t value) {
   write_all(fd, encoded, sizeof encoded);
 }
 
+inline uint64_t decode_u64(const uint8_t* encoded) {
+  uint64_t value = 0;
+  for (unsigned i = 0; i < 8; ++i) value |= uint64_t(encoded[i]) << (i * 8);
+  return value;
+}
+
 using CoherentRead = std::function<void(uint64_t, size_t, void*)>;
 using Cancelled = std::function<bool()>;
 
@@ -194,6 +204,70 @@ inline void publish(const std::string& output, const std::vector<Region>& region
       throw std::runtime_error("terminal dump final path already exists or cannot be published");
     published = true;
     if (cancelled()) throw std::runtime_error("terminal dump interrupted");
+    unlink(partial.c_str());
+  } catch (...) {
+    if (fd >= 0) close(fd);
+    if (published) unlink(output.c_str());
+    unlink(partial.c_str());
+    throw;
+  }
+}
+
+// Packet readback is a different wire protocol from the fixed-size physical
+// dump. Its first coherent region is one published u64 length; the second is
+// the bounded guest-owned byte arena. Never read the arena's unused capacity.
+inline void publish_packet(const std::string& output, const std::vector<Region>& regions,
+                           const CoherentRead& coherent_read, const Cancelled& cancelled) {
+  constexpr uint64_t maximum_capacity = 256u * 1024u * 1024u;
+  if (regions.size() != 2 || regions[0].bytes != 8 ||
+      regions[0].address % 8 != 0 || regions[1].bytes == 0 ||
+      regions[1].bytes > maximum_capacity || !coherent_read || !cancelled)
+    throw std::runtime_error("packet dump requires one aligned length and one bounded byte arena");
+  if (regions[0].address > UINT64_MAX - 8 ||
+      regions[1].address > UINT64_MAX - regions[1].bytes ||
+      !((regions[0].address + 8 <= regions[1].address) ||
+        (regions[1].address + regions[1].bytes <= regions[0].address)))
+    throw std::runtime_error("packet dump metadata and byte arena overlap or overflow");
+  if (cancelled()) throw std::runtime_error("packet dump interrupted");
+  std::array<uint8_t, 8> length_bytes {};
+  coherent_read(regions[0].address, length_bytes.size(), length_bytes.data());
+  if (cancelled()) throw std::runtime_error("packet dump interrupted");
+  const uint64_t used = decode_u64(length_bytes.data());
+  if (used == 0 || used > regions[1].bytes)
+    throw std::runtime_error("packet dump published length is absent or exceeds its arena");
+
+  const std::string partial = output + ".partial";
+  int fd = open(partial.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) throw std::runtime_error("cannot create exclusive packet dump partial file");
+  bool published = false;
+  try {
+    write_all(fd, "GSIMPKT1", 8);
+    write_u64(fd, regions[0].address);
+    write_u64(fd, regions[1].address);
+    write_u64(fd, regions[1].bytes);
+    write_u64(fd, used);
+    std::array<uint8_t, 4096> buffer {};
+    for (uint64_t offset = 0; offset < used;) {
+      if (cancelled()) throw std::runtime_error("packet dump interrupted");
+      const size_t count = static_cast<size_t>(std::min<uint64_t>(buffer.size(), used - offset));
+      coherent_read(regions[1].address + offset, count, buffer.data());
+      if (cancelled()) throw std::runtime_error("packet dump interrupted");
+      write_all(fd, buffer.data(), count);
+      offset += count;
+    }
+    coherent_read(regions[0].address, length_bytes.size(), length_bytes.data());
+    if (cancelled() || decode_u64(length_bytes.data()) != used)
+      throw std::runtime_error("packet dump length changed during coherent copy");
+    write_all(fd, "PKTEND1\n", 8);
+    if (cancelled()) throw std::runtime_error("packet dump interrupted");
+    if (fsync(fd) != 0) throw std::runtime_error("packet dump sync failed");
+    if (close(fd) != 0) { fd = -1; throw std::runtime_error("packet dump close failed"); }
+    fd = -1;
+    if (cancelled()) throw std::runtime_error("packet dump interrupted");
+    if (link(partial.c_str(), output.c_str()) != 0)
+      throw std::runtime_error("packet dump final path already exists or cannot be published");
+    published = true;
+    if (cancelled()) throw std::runtime_error("packet dump interrupted");
     unlink(partial.c_str());
   } catch (...) {
     if (fd >= 0) close(fd);

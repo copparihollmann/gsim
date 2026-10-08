@@ -1,6 +1,7 @@
 #include "terminal_dump.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -119,12 +120,85 @@ int main() {
             !std::filesystem::exists(failed_output + ".partial"),
             "interruption at final publication exposed a dump");
 
+    const std::string packet_output = (work / "packet.bin").string();
+    const std::vector<terminal_dump::Region> packet_regions{{0x1000, 8}, {0x2000, 32}};
+    static const char packet_body[] = "OUT_BIN_BEGIN v1 x 1 1 1 u 1\n\0OUT_BIN_END v1 0000000000000000\nDONE\n";
+    const std::string payload(packet_body, sizeof(packet_body) - 1);
+    auto packet_read = [&](uint64_t address, size_t n, void* destination) {
+      if (address == 0x1000) {
+        require(n == 8, "packet length read changed");
+        auto* bytes = static_cast<uint8_t*>(destination);
+        for (unsigned i = 0; i < 8; ++i) bytes[i] = static_cast<uint8_t>(payload.size() >> (8 * i));
+      } else {
+        require(address >= 0x2000 && address + n <= 0x2000 + payload.size(),
+                "packet copied unused arena capacity");
+        memcpy(destination, payload.data() + address - 0x2000, n);
+      }
+    };
+    const std::vector<terminal_dump::Region> sized_packet{{0x1000, 8}, {0x2000, 128}};
+    refuses([&] {
+      terminal_dump::publish_packet(failed_output, {{0x2000, 8}, {0x2004, 128}},
+                                    packet_read, [] { return false; });
+    });
+    refuses([&] {
+      terminal_dump::publish_packet(failed_output, {{UINT64_MAX - 7, 8}, {0x2000, 128}},
+                                    packet_read, [] { return false; });
+    });
+    require(!std::filesystem::exists(failed_output), "overlap or overflow exposed a packet");
+    terminal_dump::publish_packet(packet_output, sized_packet, packet_read, [] { return false; });
+    std::ifstream packet_file(packet_output, std::ios::binary);
+    const std::string actual_packet((std::istreambuf_iterator<char>(packet_file)), std::istreambuf_iterator<char>());
+    std::string expected_packet = "GSIMPKT1";
+    put_u64(expected_packet, 0x1000); put_u64(expected_packet, 0x2000);
+    put_u64(expected_packet, 128); put_u64(expected_packet, payload.size());
+    expected_packet += payload + "PKTEND1\n";
+    require(actual_packet == expected_packet && !std::filesystem::exists(packet_output + ".partial"),
+            "packet wire lost arbitrary payload bytes or exposed a partial file");
+    refuses([&] { terminal_dump::publish_packet(packet_output, sized_packet, packet_read, [] { return false; }); });
+    refuses([&] { terminal_dump::publish_packet(failed_output, packet_regions, packet_read, [] { return false; }); });
+    refuses([&] {
+      terminal_dump::publish_packet(failed_output, sized_packet, [](uint64_t, size_t n, void* destination) {
+        memset(destination, 0, n);
+      }, [] { return false; });
+    });
+    require(!std::filesystem::exists(failed_output), "invalid published length exposed a packet");
+    unsigned length_reads = 0;
+    refuses([&] {
+      terminal_dump::publish_packet(failed_output, sized_packet,
+          [&](uint64_t address, size_t n, void* destination) {
+            packet_read(address, n, destination);
+            if (address == 0x1000 && ++length_reads == 2)
+              static_cast<uint8_t*>(destination)[0] ^= 1;
+          }, [] { return false; });
+    });
+    require(length_reads == 2 && !std::filesystem::exists(failed_output) &&
+            !std::filesystem::exists(failed_output + ".partial"),
+            "changed published length exposed a packet");
+    bool packet_cancelled = false;
+    refuses([&] {
+      terminal_dump::publish_packet(failed_output, sized_packet,
+          [&](uint64_t address, size_t n, void* destination) {
+            packet_read(address, n, destination);
+            packet_cancelled = true;
+          }, [&] { return packet_cancelled; });
+    });
+    require(packet_cancelled && !std::filesystem::exists(failed_output),
+            "interrupted coherent packet exposed a final file");
+
     std::string valid_regions = "+dump-regions=" + region_path;
     std::string valid_output = "+dump-out=" + output_path;
     char executable[] = "emulator";
     char coherent[] = "+dump-mode=coherent";
     char* good[] = {executable, valid_regions.data(), valid_output.data(), coherent};
     require(terminal_dump::request_from_args(4, good).enabled, "coherent opt-in not selected");
+    char* legacy_mode[] = {executable, valid_regions.data(), valid_output.data()};
+    require(terminal_dump::request_from_args(3, legacy_mode).mode == terminal_dump::Request::Mode::coherent,
+            "existing implicit coherent mode changed");
+    char packet_mode[] = "+dump-mode=coherent-packet";
+    char* packet_args[] = {executable, valid_regions.data(), valid_output.data(), packet_mode};
+    require(terminal_dump::request_from_args(4, packet_args).mode ==
+                terminal_dump::Request::Mode::coherent_packet,
+            "packet mode was not explicitly selected");
     char hybrid[] = "+dump-mode=hybrid";
     char* bad_mode[] = {executable, valid_regions.data(), valid_output.data(), hybrid};
     refuses([&] { terminal_dump::request_from_args(4, bad_mode); });

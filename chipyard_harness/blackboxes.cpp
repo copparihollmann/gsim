@@ -185,14 +185,22 @@ protected:
       } else {
         try {
           auto regions = terminal_dump::read_regions(dump_request.regions, memory_base, backing.size);
-          terminal_dump::publish(dump_request.output, regions,
-              [this](uint64_t address, size_t size, void* destination) {
-                // After load_program(), testchip_tsi_t clears is_loadmem. This
-                // read traverses the SoC's live TSI/TileLink host port.
-                memif().read(address, size, destination);
-              }, [] { return interrupted != 0; });
+          auto coherent_read = [this](uint64_t address, size_t size, void* destination) {
+            // After load_program(), testchip_tsi_t clears is_loadmem. This
+            // read traverses the SoC's live TSI/TileLink host port.
+            memif().read(address, size, destination);
+          };
+          if (dump_request.mode == terminal_dump::Request::Mode::coherent_packet)
+            terminal_dump::publish_packet(dump_request.output, regions,
+                                          coherent_read, [] { return interrupted != 0; });
+          else
+            terminal_dump::publish(dump_request.output, regions,
+                                   coherent_read, [] { return interrupted != 0; });
           dump_complete = true;
-          fprintf(stderr, "[gsim-dump] complete regions=%zu source=coherent\n", regions.size());
+          if (dump_request.mode == terminal_dump::Request::Mode::coherent_packet)
+            fprintf(stderr, "[gsim-dump] complete regions=%zu source=coherent mode=packet\n", regions.size());
+          else
+            fprintf(stderr, "[gsim-dump] complete regions=%zu source=coherent\n", regions.size());
         } catch (const std::exception& error) {
           fprintf(stderr, "[gsim-dump] incomplete: %s\n", error.what());
         }
