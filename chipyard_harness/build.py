@@ -32,6 +32,8 @@ def main() -> None:
     parser.add_argument("--chipyard", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--optimization", choices=("0", "1", "2", "3"), default="1",
+                        help="native host compiler optimization level; recorded in the build transcript")
     parser.add_argument("--comb-extmod", action="append", default=[])
     parser.add_argument("--merlin-receipt", action="store_true")
     args = parser.parse_args()
@@ -87,7 +89,7 @@ def main() -> None:
         sources = sorted(model.glob("TestHarness*.cpp")) + vendor_sources + [root / "main.cpp", root / "blackboxes.cpp"]
         objects = [native / f"{index:03d}_{source.stem}.o" for index, source in enumerate(sources)]
         cxx = [str(compiler), "--driver-mode=g++", *args.compiler_arg]
-        flags = ["-O1", "-std=c++17", "-Wno-format", "-I" + str(model), "-I" + str(support), "-I" + str(prefix / "include")]
+        flags = ["-O" + args.optimization, "-std=c++17", "-Wno-format", "-I" + str(model), "-I" + str(support), "-I" + str(prefix / "include")]
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = [pool.submit(run, "compile", cxx + flags + ["-c", str(source), "-o", str(obj)],
                                    native / f"{index:03d}_{source.stem}.log")
