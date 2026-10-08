@@ -47,3 +47,14 @@ serial loading can warm caches through the interconnect. Compare kernel cycles
 only with matched loading/warmup policies. Functional agreement and matched
 timing agreement are separate observations, not consequences of successful
 compilation or byte-bound build provenance.
+
+An opt-in terminal dump can read declared DRAM regions through the live
+TSI/TileLink host port after a normal guest exit. Pass absolute paths as
+`+dump-regions=/path/regions.txt +dump-out=/path/dump.bin`, optionally with
+`+dump-mode=coherent`. The manifest contains bounded `address bytes` rows.
+The emulator writes a complete `GSIMDMP1` coherent-source frame and
+`GSIMEND1` trailer to a private partial file, then publishes the final file
+atomically. Missing, overlapping, out-of-DRAM, interrupted, or failed reads
+do not yield a passing dump. This does not read the potentially stale DRAM
+backing store, and a consumer must still bind the manifest, ELF, engine
+receipt, console, and every requested output byte before claiming a result.

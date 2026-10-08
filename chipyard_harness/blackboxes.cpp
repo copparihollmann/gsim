@@ -4,8 +4,10 @@
 #include "TestHarness.h"
 #include "mm.h"
 #include "testchip_tsi.h"
+#include "terminal_dump.h"
 #include "uart.h"
 #include <cmath>
+#include <csignal>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -19,8 +21,30 @@ static int host_argc;
 static char** host_argv;
 static backing_data_t backing{nullptr, 0};
 static uint64_t memory_base;
+static terminal_dump::Request dump_request;
+static bool dump_complete = false;
+static volatile sig_atomic_t interrupted = 0;
+static void (*previous_sigint)(int) = nullptr;
+static void (*previous_sigterm)(int) = nullptr;
 
-void harness_args(int argc, char** argv) { host_argc = argc; host_argv = argv; }
+static void note_signal(int signal) {
+  interrupted = 1;
+  auto previous = signal == SIGINT ? previous_sigint : previous_sigterm;
+  if (previous && previous != SIG_IGN && previous != SIG_DFL) previous(signal);
+  else if (previous == SIG_DFL) {
+    std::signal(signal, SIG_DFL);
+    std::raise(signal);
+  }
+}
+
+bool harness_dump_requested() { return dump_request.enabled; }
+bool harness_dump_complete() { return dump_complete && !interrupted; }
+
+void harness_args(int argc, char** argv) {
+  dump_request = terminal_dump::request_from_args(argc, argv);
+  host_argc = argc;
+  host_argv = argv;
+}
 
 static uint64_t plusarg(const char* format, uint64_t fallback) {
   std::string key = "+" + std::string(format);
@@ -141,13 +165,40 @@ void SimDRAM(int64_t address_bits, int64_t chip_id, int64_t clock_hz, int64_t da
 
 class HostTSI : public testchip_tsi_t {
 public:
-  HostTSI() : testchip_tsi_t(host_argc, host_argv, true) {}
+  HostTSI() : testchip_tsi_t(host_argc, host_argv, true) {
+    if (dump_request.enabled) {
+      previous_sigint = std::signal(SIGINT, note_signal);
+      previous_sigterm = std::signal(SIGTERM, note_signal);
+    }
+  }
 protected:
   void load_mem_write(addr_t address, size_t size, const void* source) override {
     memcpy(checked_memory(address, size), source, size);
   }
   void load_mem_read(addr_t address, size_t size, void* destination) override {
     memcpy(destination, checked_memory(address, size), size);
+  }
+  void stop() override {
+    if (dump_request.enabled) {
+      if (interrupted || exit_code() != 0 || !backing.data) {
+        fprintf(stderr, "[gsim-dump] refused: signal, nonzero guest exit or absent DRAM\n");
+      } else {
+        try {
+          auto regions = terminal_dump::read_regions(dump_request.regions, memory_base, backing.size);
+          terminal_dump::publish(dump_request.output, regions,
+              [this](uint64_t address, size_t size, void* destination) {
+                // After load_program(), testchip_tsi_t clears is_loadmem. This
+                // read traverses the SoC's live TSI/TileLink host port.
+                memif().read(address, size, destination);
+              }, [] { return interrupted != 0; });
+          dump_complete = true;
+          fprintf(stderr, "[gsim-dump] complete regions=%zu source=coherent\n", regions.size());
+        } catch (const std::exception& error) {
+          fprintf(stderr, "[gsim-dump] incomplete: %s\n", error.what());
+        }
+      }
+    }
+    testchip_tsi_t::stop();
   }
 };
 

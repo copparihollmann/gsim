@@ -49,7 +49,8 @@ def main() -> None:
     prefix = chipyard / ".conda-env/riscv-tools"
     support = chipyard / "generators/testchipip/src/main/resources/testchipip/csrc"
     vendor_sources = [support / f"{name}.cc" for name in ("mm", "testchip_htif", "testchip_tsi", "uart")]
-    inputs = [("harness:" + path.name, path) for path in (root / "main.cpp", root / "blackboxes.cpp", Path(__file__).resolve())]
+    inputs = [("harness:" + path.name, path) for path in
+              (root / "main.cpp", root / "blackboxes.cpp", root / "terminal_dump.h", Path(__file__).resolve())]
     inputs += [("vendor:" + path.name, path) for path in sorted(support.glob("*.h")) + vendor_sources]
     inputs += [("fesvr:" + path.name, path) for path in sorted((prefix / "include/fesvr").glob("*.h"))]
     inputs += [("fesvr-library", prefix / "lib/libfesvr.a")]

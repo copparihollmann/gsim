@@ -9,6 +9,8 @@ extern uint64_t gsim_time_ps;
 extern bool gsim_done;
 extern int gsim_exit_code;
 void harness_args(int argc, char** argv);
+bool harness_dump_requested();
+bool harness_dump_complete();
 uint64_t harness_sample_step_ps();
 uint64_t harness_reference_period_ps();
 
@@ -49,6 +51,10 @@ int main(int argc, char** argv) {
       if (gsim_done || dut->get_io$$success()) {
         fprintf(stderr, "GSIM model finished execution.\nCycles: %llu\n",
                 static_cast<unsigned long long>(gsim_time_ps / reference_period_ps));
+        if (harness_dump_requested() && (!gsim_done || gsim_exit_code != 0 || !harness_dump_complete())) {
+          fprintf(stderr, "[gsim-dump] incomplete: normal guest exit and full coherent dump required\n");
+          return 5;
+        }
         return gsim_exit_code;
       }
     }
