@@ -2,6 +2,10 @@
 
 GSIM accepts chirrtl, and compiles it to C++
 
+For the Merlin native Chipyard harness, pinned-source builds and deployment on a
+new Linux worker, see [Merlin integration](MERLIN.md). Use this fork's `merlin`
+branch; its `master` branch retains the upstream simulator.
+
 ## Prerequisites
 
 + Install [GMP](https://gmplib.org/), [clang 19(+)](https://clang.llvm.org/).
