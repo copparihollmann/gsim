@@ -23,6 +23,30 @@ def sha(path: Path) -> str:
     return digest.hexdigest()
 
 
+def selected_include_inputs(prefix: Path) -> list[tuple[str, Path]]:
+    """Bind the complete selected include tree, not just top-level FESVR headers.
+
+    FESVR can include sibling RISC-V headers. This conservative closure also
+    covers nested .hpp/.inc inputs without guessing at target-specific names.
+    Compiler/system headers remain a separately qualified toolchain dependency.
+    """
+    include = (prefix / "include").resolve(strict=True)
+    inputs = []
+    for path in sorted(include.rglob("*")):
+        if path.is_symlink():
+            raise RuntimeError(f"selected include tree must contain regular files/directories: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError(f"unsupported selected include input: {path}")
+        relative = path.relative_to(include)
+        role = ("fesvr:" + path.name) if relative.parent == Path("fesvr") else ("selected-include:" + relative.as_posix())
+        inputs.append((role, path))
+    if not inputs:
+        raise RuntimeError("selected native include tree is empty")
+    return inputs
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--firrtl", type=Path, required=True)
@@ -54,7 +78,7 @@ def main() -> None:
     inputs = [("harness:" + path.name, path) for path in
               (root / "main.cpp", root / "blackboxes.cpp", root / "terminal_dump.h", Path(__file__).resolve())]
     inputs += [("vendor:" + path.name, path) for path in sorted(support.glob("*.h")) + vendor_sources]
-    inputs += [("fesvr:" + path.name, path) for path in sorted((prefix / "include/fesvr").glob("*.h"))]
+    inputs += selected_include_inputs(prefix)
     inputs += [("fesvr-library", prefix / "lib/libfesvr.a")]
     # Preserve the emitter's source ownership, including uncommitted generic fixes.
     emitter_repo = root.parent

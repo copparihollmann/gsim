@@ -39,13 +39,18 @@ Chipyard must contain initialized TestChipIP and the selected FESVR installation
 
 ```text
 generators/testchipip/src/main/resources/testchipip/csrc/
-.conda-env/riscv-tools/include/fesvr/
+.conda-env/riscv-tools/include/  # complete selected tree, including FESVR's sibling headers
 .conda-env/riscv-tools/lib/libfesvr.a
 ```
 
 To write a Merlin receipt, install Merlin core and `packages/merlin-experiments`
 in the Python environment used below. Keep the selected source/tool versions and
 all receipt-referenced inputs with the resulting binary.
+
+The builder binds the complete selected include tree before compiling and checks it
+afterwards. Copying only `include/fesvr/*.h` is insufficient: those headers can include
+siblings such as `include/riscv/cfg.h`. Supply regular files/directories rather than
+symlinked include trees. System/compiler headers remain an external toolchain requirement.
 
 ```sh
 python chipyard_harness/build.py \

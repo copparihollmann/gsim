@@ -18,6 +18,9 @@ Builds require fresh output directories and preserve failed logs. The receipt
 pins adopted FIRRTL, all emitted model files, the emitter, compiler, harness,
 upstream C++ support and FESVR library. It explicitly does **not** claim that this
 build elaborated the RTL. Keep these pinned source/model files with the binary.
+The complete selected `.conda-env/riscv-tools/include/` tree is pinned, including
+FESVR's sibling and nested headers; a copy of only the top-level FESVR headers is
+not a complete build input. Compiler/system headers need separate toolchain qualification.
 
 Clock periods come from the original FIRRTL real parameters. The sample cadence
 is the greatest common divisor of declared clock half-periods; reported harness
