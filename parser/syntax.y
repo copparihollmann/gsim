@@ -31,6 +31,38 @@ static char* emptyStr = NULL;
     #define yylex(x) scanner->lex(x)
     // #define yylex(x) scanner->lex_debug(x)
 
+    // Interpret a quoted radix literal only inside a typed integer expression.
+    // printf formats and external-module string parameters remain String tokens.
+    static bool normalizeQuotedInteger(const char* text, std::string& value) {
+      const std::string literal(text);
+      if (literal.size() < 4 || literal.front() != '"' || literal.back() != '"') return false;
+      const char radix = literal[1];
+      unsigned base;
+      switch (radix) {
+        case 'b': base = 2; break;
+        case 'o': base = 8; break;
+        case 'd': base = 10; break;
+        case 'h': base = 16; break;
+        default: return false;
+      }
+      size_t first = 2;
+      const bool negative = literal[first] == '-';
+      if (negative) ++first;
+      if (first == literal.size() - 1) return false;
+      for (size_t pos = first; pos < literal.size() - 1; ++pos) {
+        const char digit = literal[pos];
+        unsigned number;
+        if (digit >= '0' && digit <= '9') number = digit - '0';
+        else if (digit >= 'a' && digit <= 'f') number = digit - 'a' + 10;
+        else if (digit >= 'A' && digit <= 'F') number = digit - 'A' + 10;
+        else return false;
+        if (number >= base) return false;
+      }
+      value = (negative ? "-0" : "0") + std::string(1, radix)
+          + literal.substr(first, literal.size() - first - 1);
+      return true;
+    }
+
     static PNode* buildCatNodes(int lineno, PNode* first, PNode* second, PNode* tailList) {
       std::vector<PNode*> catArgs;
       if (first) catArgs.push_back(first);
@@ -73,12 +105,14 @@ static char* emptyStr = NULL;
 %token <typeRUW> Ruw
 %token <strVal> Info
 %token Flip Mux Validif Invalidate Mem SMem CMem Wire Reg RegReset Inst Of Node Attach
+%token With ResetClause
 %token When Else Stop Printf Skip Input Output Assert
 %token Module Extmodule Defname Parameter Intmodule Intrinsic Circuit Connect Public
 %token Define Const
 %token Firrtl Version INDENT DEDENT
 %token RightArrow "=>"
 %token Leftarrow "<-"
+%token LegacyConnect "<="
 %token DataType Depth ReadLatency WriteLatency ReadUnderwrite Reader Writer Readwriter Write Read Infer Rdwr Mport
 %token Layer Layerblock
 %token Cat
@@ -87,6 +121,7 @@ static char* emptyStr = NULL;
 %type <plist> cir_mods fields
 %type <pnode> module extmodule ports statements port type statement when_else param exprs params layer_decl layer_children layer_output layer_block cat_tail layerblock_stmt intrinsic_extra
 %type <pnode> chirrtl_memory chirrtl_memory_datatype chirrtl_memory_port
+%type <pnode> legacy_reset
 %type <pnode> reference expr primop_2expr primop_1expr primop_1expr1int primop_1expr2int
 %type <pnode> field type_aggregate type_ground circuit
 %type <strVal> info ALLID ext_defname intrinsic_params intrinsic_param_list intrinsic_param
@@ -108,6 +143,8 @@ ALLID: ID {$$ = $1; }
     | Mem { $$ = "mem"; }
     | Of { $$ = "of"; }
     | Reg { $$ = "reg"; }
+    | With { $$ = "with"; }
+    | ResetClause { $$ = "reset"; }
     | Input { $$ = "input"; }
     | Output { $$ = "output"; }
     | Invalidate { $$ = "invalidate"; }
@@ -183,6 +220,12 @@ cat_tail:
 expr: IntType width '(' ')'     { $$ = newNode(P_EXPR_INT_NOINIT, synlineno(), $1, 0); $$->setWidth($2); $$->setSign($1[0] == 'S');}
     | IntType width '(' INT ')' { $$ = newNode(P_EXPR_INT_INIT, synlineno(), $1, 0); $$->setWidth($2); $$->setSign($1[0] == 'S'); $$->appendExtraInfo($4);}
     | IntType width '(' RINT ')'{ $$ = newNode(P_EXPR_INT_INIT, synlineno(), $1, 0); $$->setWidth($2); $$->setSign($1[0] == 'S'); $$->appendExtraInfo($4);}
+    | IntType width '(' String ')' {
+          std::string value;
+          if (!normalizeQuotedInteger($4, value)) error("invalid quoted integer literal");
+          $$ = newNode(P_EXPR_INT_INIT, synlineno(), $1, 0);
+          $$->setWidth($2); $$->setSign($1[0] == 'S'); $$->appendExtraInfo(value.c_str());
+      }
     | reference { $$ = $1; }
     | Mux '(' expr ',' expr ',' expr ')' { $$ = newNode(P_EXPR_MUX, synlineno(), NULL, 3, $3, $5, $7); }
     | Validif '(' expr ',' expr ')' { $$ = $5; }
@@ -261,17 +304,30 @@ references:
 statements: { $$ = new PNode(P_STATEMENTS, synlineno()); }
     | statements statement { $$ =  $1; $1->appendChild($2); }
     ;
+legacy_reset: ResetClause "=>" '(' expr ',' expr ')' info {
+        $$ = newNode(P_EXPRS, synlineno(), $8, NULL, 2, $4, $6);
+    }
+    ;
 when_else:  %prec LOWER_THAN_ELSE { $$ = new PNode(P_STATEMENTS, synlineno()); }
     | Else ':' INDENT statements DEDENT { $$ = $4; }
     ;
 statement: Wire ALLID ':' type info    { $$ = newNode(P_WIRE_DEF, $4->lineno, $5, $2, 1, $4); }
     | Reg      ALLID ':' type ',' expr info  { $$ = newNode(P_REG_DEF, $4->lineno, /* info */$7 , /* name */$2, /* num */2, /* Type */$4, /* Clock */$6); }
+    | Reg ALLID ':' type ',' expr With ':' info INDENT legacy_reset DEDENT {
+          $$ = newNode(P_REG_RESET_DEF, $4->lineno, $9, $2, 4,
+              $4, $6, $11->getChild(0), $11->getChild(1));
+      }
+    | Reg ALLID ':' type ',' expr With ':' '(' legacy_reset ')' info {
+          $$ = newNode(P_REG_RESET_DEF, $4->lineno, $12, $2, 4,
+              $4, $6, $10->getChild(0), $10->getChild(1));
+      }
     | RegReset ALLID ':' type ',' expr ',' expr ',' expr info { $$ = newNode(P_REG_RESET_DEF, $4->lineno, /* info */$11, /* name */$2, /* num */4, /* Type */ $4, /* Clock */$6, /* Reset Cond */ $8 , /* Reset Val*/$10); }
     | chirrtl_memory      { $$ = $1; }
     | chirrtl_memory_port { $$ = $1; }
     | Inst ALLID Of ALLID info    { $$ = newNode(P_INST, synlineno(), $5, $2, 0); $$->appendExtraInfo($4); }
     | Node ALLID '=' expr info { $$ = newNode(P_NODE, synlineno(), $5, $2, 1, $4); }
     | Connect reference ',' expr info { $$ = newNode(P_CONNECT, $2->lineno, $5, NULL, 2, $2, $4); }
+    | reference "<=" expr info { $$ = newNode(P_CONNECT, $1->lineno, $4, NULL, 2, $1, $3); }
     | Connect reference ',' Read '(' expr ')' info { $$ = newNode(P_CONNECT, $2->lineno, $8, NULL, 2, $2, $6); }
     | reference "<-" expr info  { $$ = newNode(P_PAR_CONNECT, $1->lineno, $4, NULL, 2, $1, $3); }
     | Invalidate reference info { $$ = newNode(P_INVALID, synlineno(), nullptr, 0); $$->setWidth(1); $$ = newNode(P_CONNECT, $2->lineno, $3, NULL, 2, $2, $$); }

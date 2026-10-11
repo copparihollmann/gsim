@@ -3,6 +3,13 @@
 - Any `*.fir` file in this directory is auto-discovered by `make fir-tests` and by the GitHub CI `fir-regression` job.
 - A same-name `*.cpp` file is compiled with the generated model and run under
   AddressSanitizer and UndefinedBehaviorSanitizer.
+- legacy-regreset.fir: Checks indented and inline legacy register resets against
+  modern `regreset`, legacy `<=` connects, zero-condition/self-value resets against ordinary registers,
+  `with`/`reset` identifiers, and typed quoted radix literals. Its printf string
+  remains a string rather than being interpreted as an integer.
+- legacy-keyword-identifiers.fir: Checks a partial connect to a wire named `with`
+  immediately after an ordinary register, with an input named `reset`. Legacy
+  reset syntax must not capture this valid sequence as a reset declaration.
 - array-narrowing.fir: Checks element-width truncation on two-dimensional
   register row connects, plus unsigned and signed whole-array narrowing and
   extension across native C++ storage widths.

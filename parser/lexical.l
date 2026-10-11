@@ -134,6 +134,8 @@ info        [0-9A-Za-z.{}:,/ _-]+
 <normal>wire                    { return token::Wire; }
 <normal>reg                     { return token::Reg; }
 <normal>regreset                { return token::RegReset; }
+<normal>with/[ \t]*:             { return token::With; }
+<normal>reset/[ \t]*=>           { return token::ResetClause; }
 <normal>inst                    { return token::Inst; }
 <normal>of                      { return token::Of; }
 <normal>node                    { return token::Node; }
@@ -166,6 +168,7 @@ info        [0-9A-Za-z.{}:,/ _-]+
 <normal>{string}                { yylval->strVal = strdup(yytext); return token::String; }
 <normal>"=>"                    { return token::RightArrow; }
 <normal>"<-"                    { return token::Leftarrow; }
+<normal>"<="                    { return token::LegacyConnect; }
 <normal>"<"                     { angle_num ++; return yytext[0];}
 <normal>">"                     { angle_num --; return yytext[0];}
 <normal>"["                     { square_num ++; return yytext[0];}
